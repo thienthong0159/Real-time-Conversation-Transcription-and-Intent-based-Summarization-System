@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color: #171b2e; background: #f7f8fc; font-family: 'DM Sans', sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; }
+button, select { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+
+@layer components {
+  .card { @apply rounded-3xl border border-white/90 bg-white shadow-card; }
+  .eyebrow { @apply text-xs font-bold uppercase tracking-[0.2em] text-primary; }
+  .btn-primary { @apply inline-flex items-center justify-center gap-2 rounded-2xl bg-primary px-5 py-3.5 font-bold text-white shadow-glow transition hover:-translate-y-0.5 hover:bg-[#594bd8] focus:outline-none focus:ring-4 focus:ring-primary/20; }
+  .btn-secondary { @apply inline-flex items-center justify-center gap-2 rounded-2xl border border-[#e3e4ed] bg-white px-5 py-3.5 font-bold text-ink transition hover:-translate-y-0.5 hover:border-primary/30 hover:text-primary; }
+}
+
+.gradient-text { background: linear-gradient(110deg, #6759e8 20%, #25b7d3 92%); -webkit-background-clip: text; color: transparent; }
+.dot-grid { background-image: radial-gradient(rgba(103,89,232,.15) 1px, transparent 1px); background-size: 22px 22px; }
+.wave-bar { animation: wave 1s ease-in-out infinite; transform-origin: center; }
+@keyframes wave { 0%, 100% { transform: scaleY(.35); } 50% { transform: scaleY(1); } }
+@keyframes pulseRing { 0% { transform: scale(.9); opacity: .7; } 100% { transform: scale(1.35); opacity: 0; } }
+.pulse-ring { animation: pulseRing 1.8s ease-out infinite; }
