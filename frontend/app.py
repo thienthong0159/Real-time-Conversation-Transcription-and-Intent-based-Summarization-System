@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import sys
 from pathlib import Path
 
@@ -51,6 +52,9 @@ if "translation" not in st.session_state:
 if "translation_target_language" not in st.session_state:
     st.session_state.translation_target_language = None
 
+if "translation_model_loaded" not in st.session_state:
+    st.session_state.translation_model_loaded = False
+
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
     "Model 1 - CNN + BiLSTM + CTC (Coming soon)": "model1_cnn_bilstm_ctc",
@@ -79,19 +83,34 @@ if st.session_state.translation_target_language != target_language:
 status_box = st.empty()
 
 if st.button("Load Selected Model"):
-
-    def update_status(message):
-        status_box.info(message)
-
     try:
-        with st.spinner("Đang load model..."):
-            st.session_state.model_manager.load_model(
-                selected_model,
-                progress_callback=update_status,
+        if translation_enabled:
+            status_box.info("Loading speech-to-text and translation models...")
+            with st.spinner("Loading speech-to-text and translation models..."):
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    asr_future = executor.submit(
+                        st.session_state.model_manager.load_model,
+                        selected_model,
+                    )
+                    translation_future = executor.submit(
+                        st.session_state.translation_service.load,
+                    )
+
+                    asr_future.result()
+                    translation_future.result()
+
+            st.session_state.translation_model_loaded = True
+            status_box.success(
+                f"{selected_label} and translation model loaded successfully."
             )
+        else:
+            status_box.info("Loading speech-to-text model...")
+            with st.spinner("Loading speech-to-text model..."):
+                st.session_state.model_manager.load_model(selected_model)
+
+            status_box.success(f"{selected_label} loaded successfully.")
 
         st.session_state.loaded_model = selected_model
-        status_box.success(f"{selected_label} đã được load thành công.")
 
     except Exception as e:
         status_box.error(str(e))
@@ -100,6 +119,9 @@ if st.session_state.loaded_model is not None:
     st.success(f"Model đang được load: {st.session_state.loaded_model}")
 else:
     st.info("Chưa có model nào được load. Hãy chọn model và bấm Load Selected Model.")
+
+if st.session_state.translation_model_loaded:
+    st.success("Translation model is loaded.")
 
 st.divider()
 
