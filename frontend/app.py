@@ -1,5 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import sys
+import tempfile
+import time
 from pathlib import Path
 
 import streamlit as st
@@ -15,12 +17,62 @@ try:
 except ImportError:
     mic_recorder = None
 
+try:
+    import numpy as np
+    import soundfile as sf
+    from streamlit_webrtc import WebRtcMode, webrtc_streamer
+except ImportError:
+    np = None
+    sf = None
+    WebRtcMode = None
+    webrtc_streamer = None
+
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
 UPLOAD_DIR = ROOT_DIR / "uploads"
 UPLOAD_DIR.mkdir(exist_ok=True)
+
+
+def audio_frames_to_wav(frames):
+    arrays = []
+    sample_rate = None
+
+    for frame in frames:
+        array = frame.to_ndarray()
+        if array.ndim == 2:
+            array = array.mean(axis=0)
+        arrays.append(array.astype("float32"))
+        sample_rate = frame.sample_rate
+
+    if not arrays or sample_rate is None:
+        return None
+
+    audio = np.concatenate(arrays)
+    max_value = np.max(np.abs(audio)) if audio.size else 0
+    if max_value > 1:
+        audio = audio / max_value
+
+    temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    temp_path = Path(temp_file.name)
+    temp_file.close()
+    sf.write(temp_path, audio, sample_rate)
+    return temp_path
+
+
+def transcribe_and_translate_chunk(audio_path, target_language, translation_enabled):
+    transcript = st.session_state.model_manager.transcribe(str(audio_path))
+    translation = ""
+
+    if translation_enabled and transcript.strip():
+        st.session_state.translation_service.load()
+        translation = st.session_state.translation_service.translate(
+            transcript,
+            target_lang=target_language,
+        )
+
+    return transcript, translation
 
 st.set_page_config(
     page_title="Conversation Transcription",
@@ -54,6 +106,12 @@ if "translation_target_language" not in st.session_state:
 
 if "translation_model_loaded" not in st.session_state:
     st.session_state.translation_model_loaded = False
+
+if "realtime_transcript" not in st.session_state:
+    st.session_state.realtime_transcript = ""
+
+if "realtime_translation" not in st.session_state:
+    st.session_state.realtime_translation = ""
 
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
@@ -122,6 +180,110 @@ else:
 
 if st.session_state.translation_model_loaded:
     st.success("Translation model is loaded.")
+
+st.divider()
+
+st.subheader("Real-time microphone transcription")
+
+if webrtc_streamer is None or WebRtcMode is None or np is None or sf is None:
+    st.warning(
+        "Real-time microphone mode requires streamlit-webrtc, numpy, and soundfile. "
+        "Install the project dependencies, then restart Streamlit."
+    )
+else:
+    realtime_chunk_seconds = int(
+        st.selectbox(
+            "Realtime chunk length",
+            ["3", "5", "8", "10"],
+            index=1,
+        )
+    )
+
+    realtime_ctx = webrtc_streamer(
+        key="realtime-transcription",
+        mode=WebRtcMode.SENDONLY,
+        media_stream_constraints={"audio": True, "video": False},
+        audio_receiver_size=256,
+    )
+
+    realtime_controls = st.columns(2)
+    process_realtime = realtime_controls[0].button("Process live audio")
+    clear_realtime = realtime_controls[1].button("Clear live text")
+
+    if clear_realtime:
+        st.session_state.realtime_transcript = ""
+        st.session_state.realtime_translation = ""
+        st.rerun()
+
+    realtime_status = st.empty()
+
+    if process_realtime:
+        if st.session_state.loaded_model is None:
+            realtime_status.warning("Load the speech-to-text model first.")
+        elif realtime_ctx.audio_receiver is None:
+            realtime_status.warning("Start the microphone stream first.")
+        else:
+            frames = []
+            started_at = time.time()
+            realtime_status.info("Listening to live audio chunk...")
+
+            while time.time() - started_at < realtime_chunk_seconds:
+                try:
+                    frames.extend(realtime_ctx.audio_receiver.get_frames(timeout=1))
+                except Exception:
+                    pass
+
+            if not frames:
+                realtime_status.warning("No live audio frames received.")
+            else:
+                temp_audio_path = audio_frames_to_wav(frames)
+
+                if temp_audio_path is None:
+                    realtime_status.warning("Could not build an audio chunk.")
+                else:
+                    try:
+                        with st.spinner("Transcribing live audio chunk..."):
+                            chunk_transcript, chunk_translation = (
+                                transcribe_and_translate_chunk(
+                                    temp_audio_path,
+                                    target_language,
+                                    translation_enabled,
+                                )
+                            )
+
+                        if chunk_transcript:
+                            st.session_state.realtime_transcript = (
+                                f"{st.session_state.realtime_transcript} "
+                                f"{chunk_transcript}"
+                            ).strip()
+
+                        if chunk_translation:
+                            st.session_state.realtime_translation = (
+                                f"{st.session_state.realtime_translation} "
+                                f"{chunk_translation}"
+                            ).strip()
+
+                        realtime_status.success("Live chunk processed.")
+                    except Exception as e:
+                        realtime_status.error(str(e))
+                    finally:
+                        temp_audio_path.unlink(missing_ok=True)
+
+    realtime_transcript_column, realtime_translation_column = st.columns(2)
+
+    with realtime_transcript_column:
+        st.text_area(
+            "Live Vietnamese Transcript",
+            st.session_state.realtime_transcript,
+            height=180,
+        )
+
+    with realtime_translation_column:
+        st.text_area(
+            f"Live {target_language_label} Translation",
+            st.session_state.realtime_translation,
+            height=180,
+        )
 
 st.divider()
 
