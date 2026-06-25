@@ -245,7 +245,14 @@ else:
     realtime_chunk_seconds = int(
         st.selectbox(
             "Realtime chunk length",
-            ["3", "5", "8", "10"],
+            ["1", "2", "3", "5", "8", "10"],
+            index=1,
+        )
+    )
+    realtime_translation_seconds = int(
+        st.selectbox(
+            "Realtime translation interval",
+            ["3", "4", "5", "8", "10"],
             index=1,
         )
     )
@@ -295,6 +302,8 @@ else:
             realtime_status.info(
                 "Listening continuously. Stop the microphone stream to end."
             )
+            pending_translation_text = ""
+            last_translation_at = time.time()
 
             while realtime_ctx.state.playing:
                 frames = []
@@ -319,25 +328,40 @@ else:
                     continue
 
                 try:
-                    chunk_transcript, chunk_translation = (
-                        transcribe_and_translate_chunk(
-                            temp_audio_path,
-                            target_language,
-                            translation_enabled,
-                        )
+                    chunk_transcript = st.session_state.model_manager.transcribe(
+                        str(temp_audio_path)
                     )
+                    chunk_translation = ""
 
                     if chunk_transcript:
                         st.session_state.realtime_transcript = (
                             f"{st.session_state.realtime_transcript} "
                             f"{chunk_transcript}"
                         ).strip()
-
-                    if chunk_translation:
-                        st.session_state.realtime_translation = (
-                            f"{st.session_state.realtime_translation} "
-                            f"{chunk_translation}"
+                        pending_translation_text = (
+                            f"{pending_translation_text} {chunk_transcript}"
                         ).strip()
+
+                    should_translate = (
+                        translation_enabled
+                        and pending_translation_text
+                        and time.time() - last_translation_at >= realtime_translation_seconds
+                    )
+
+                    if should_translate:
+                        st.session_state.translation_service.load()
+                        chunk_translation = st.session_state.translation_service.translate(
+                            pending_translation_text,
+                            target_lang=target_language,
+                        )
+                        pending_translation_text = ""
+                        last_translation_at = time.time()
+
+                        if chunk_translation:
+                            st.session_state.realtime_translation = (
+                                f"{st.session_state.realtime_translation} "
+                                f"{chunk_translation}"
+                            ).strip()
 
                     render_realtime_text()
                     realtime_status.success(
@@ -348,6 +372,22 @@ else:
                     break
                 finally:
                     temp_audio_path.unlink(missing_ok=True)
+
+            if translation_enabled and pending_translation_text:
+                try:
+                    st.session_state.translation_service.load()
+                    final_translation = st.session_state.translation_service.translate(
+                        pending_translation_text,
+                        target_lang=target_language,
+                    )
+                    if final_translation:
+                        st.session_state.realtime_translation = (
+                            f"{st.session_state.realtime_translation} "
+                            f"{final_translation}"
+                        ).strip()
+                        render_realtime_text()
+                except Exception as e:
+                    realtime_status.error(str(e))
 
             realtime_status.info("Live transcription stopped.")
 
