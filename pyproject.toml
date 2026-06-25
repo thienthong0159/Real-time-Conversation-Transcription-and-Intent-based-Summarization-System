@@ -28,6 +28,7 @@ dependencies = [
     "datasets>=4.1.1",
     "numba>=0.61.2",
     "torchvision>=0.21.0",
+    "matplotlib>=3.8.0",
 ]
 
 [tool.uv]
