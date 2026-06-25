@@ -3,10 +3,11 @@ import tempfile
 from pathlib import Path
 
 try:
+    import librosa
     import torch
     import torchaudio
 except ImportError as exc:
-    raise RuntimeError("Feature extraction requires torch and torchaudio.") from exc
+    raise RuntimeError("Feature extraction requires librosa, torch, and torchaudio.") from exc
 
 
 class MfccExtractor:
@@ -25,10 +26,12 @@ class MfccExtractor:
         )
 
     def from_file(self, path):
-        waveform, source_rate = torchaudio.load(str(path))
-        waveform = waveform.mean(dim=0, keepdim=True)
-        if source_rate != self.sample_rate:
-            waveform = torchaudio.functional.resample(waveform, source_rate, self.sample_rate)
+        audio, _ = librosa.load(
+            str(path),
+            sr=self.sample_rate,
+            mono=True,
+        )
+        waveform = torch.from_numpy(audio).float().unsqueeze(0)
         features = self.transform(waveform).squeeze(0).transpose(0, 1)
         return features
 
