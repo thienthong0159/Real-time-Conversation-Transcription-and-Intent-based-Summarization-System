@@ -1,0 +1,44 @@
+[project]
+name = "speech-processing"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+
+dependencies = [
+    # Deep Learning
+    "torch>=2.6.0",
+    "torchaudio>=2.6.0",
+    "transformers>=4.56.0",
+    "accelerate>=1.14.0",
+    "huggingface-hub>=0.35.0",
+    "safetensors>=0.6.2",
+    # Audio
+    "librosa>=0.11.0",
+    "soundfile>=0.13.1",
+    "numpy>=2.3.3",
+    # Web
+    "fastapi>=0.118.0",
+    "uvicorn>=0.37.0",
+    "streamlit>=1.49.1",
+    "streamlit-mic-recorder>=0.0.8",
+    "python-multipart>=0.0.20",
+    # Utilities
+    "python-dotenv>=1.1.1",
+    "sentencepiece>=0.2.1",
+    "tokenizers>=0.22.1",
+    "datasets>=4.1.1",
+    "numba>=0.61.2",
+    "torchvision>=0.21.0",
+]
+
+[tool.uv]
+managed = true
+
+[[tool.uv.index]]
+name = "pytorch-gpu"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-gpu" }
+torchaudio = { index = "pytorch-gpu" }
+torchvision = { index = "pytorch-gpu" }
