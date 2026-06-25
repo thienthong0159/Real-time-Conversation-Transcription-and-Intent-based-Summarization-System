@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
-LOCAL_MODEL_DIR = ROOT_DIR / "checkpoints" / "nllb-200-distilled-600M"
+LOCAL_MODEL_DIR = ROOT_DIR / "checkpoints" / "opus-mt-vi-en"
 HF_CACHE_DIR = ROOT_DIR / "checkpoints" / "hf_cache"
 
 try:
@@ -17,16 +17,12 @@ if load_dotenv is not None:
     load_dotenv(ROOT_DIR / ".env")
 
 LANGUAGES = {
-    "English": "eng_Latn",
-    "French": "fra_Latn",
-    "Japanese": "jpn_Jpan",
-    "Korean": "kor_Hang",
-    "Chinese": "zho_Hans",
+    "English": "en",
 }
 
 
 class TranslationService:
-    def __init__(self, model_name="facebook/nllb-200-distilled-600M"):
+    def __init__(self, model_name="Helsinki-NLP/opus-mt-vi-en"):
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
@@ -48,6 +44,9 @@ class TranslationService:
                 "tokenizer.json",
                 "sentencepiece.bpe.model",
                 "spm.model",
+                "source.spm",
+                "target.spm",
+                "vocab.json",
             )
         )
         weight_patterns = ("*.safetensors", "pytorch_model*.bin")
@@ -163,7 +162,7 @@ class TranslationService:
             except Exception as fallback_exc:
                 self._clear_download_artifacts()
                 raise RuntimeError(
-                    "The NLLB translator model could not be downloaded. "
+                    "The Vietnamese-English translator model could not be downloaded. "
                     f"Original error: {exc}. Fallback error: {fallback_exc}"
                 ) from fallback_exc
 
@@ -183,7 +182,7 @@ class TranslationService:
         else:
             if progress_callback:
                 progress_callback(
-                    "No local translation model found. Downloading NLLB translator..."
+                    "No local translation model found. Downloading Vietnamese-English translator..."
                 )
             self._download_and_save_once()
 
@@ -200,8 +199,10 @@ class TranslationService:
         if self.model is None:
             self.load()
 
-        self.tokenizer.src_lang = source_lang
-        forced_bos_token_id = self.tokenizer.convert_tokens_to_ids(target_lang)
+        forced_bos_token_id = None
+        if self.model_name.startswith("facebook/nllb"):
+            self.tokenizer.src_lang = source_lang
+            forced_bos_token_id = self.tokenizer.convert_tokens_to_ids(target_lang)
 
         translated_chunks = [
             self._translate_chunk(chunk.strip(), forced_bos_token_id)
@@ -210,7 +211,7 @@ class TranslationService:
         ]
         return " ".join(translated_chunks).strip()
 
-    def _translate_chunk(self, text, forced_bos_token_id):
+    def _translate_chunk(self, text, forced_bos_token_id=None):
         inputs = self.tokenizer(
             text,
             return_tensors="pt",
@@ -223,11 +224,16 @@ class TranslationService:
         }
 
         with self.torch.no_grad():
+            generation_kwargs = {
+                "max_length": 512,
+                "num_beams": 2,
+            }
+            if forced_bos_token_id is not None:
+                generation_kwargs["forced_bos_token_id"] = forced_bos_token_id
+
             generated_tokens = self.model.generate(
                 **inputs,
-                forced_bos_token_id=forced_bos_token_id,
-                max_length=512,
-                num_beams=4,
+                **generation_kwargs,
             )
 
         return self.tokenizer.batch_decode(
