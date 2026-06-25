@@ -2,17 +2,18 @@ import os
 import re
 from pathlib import Path
 
-import torch
-from dotenv import load_dotenv
-from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
-
-from backend.utils.device import get_device, get_torch_dtype
-
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 LOCAL_MODEL_DIR = ROOT_DIR / "checkpoints" / "nllb-200-distilled-600M"
 
-load_dotenv(ROOT_DIR / ".env")
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv(ROOT_DIR / ".env")
+
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 
@@ -30,15 +31,39 @@ class TranslationService:
         self.model_name = model_name
         self.tokenizer = None
         self.model = None
+        self.device = None
+        self.torch_dtype = None
+        self.torch = None
+        self.auto_model = None
+        self.auto_tokenizer = None
+
+    def _ensure_dependencies(self):
+        if self.torch is not None:
+            return
+
+        try:
+            import torch
+            from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
+        except ImportError as exc:
+            raise RuntimeError(
+                "Translation requires torch and transformers. "
+                "Install the project dependencies with `uv sync` before using translation."
+            ) from exc
+
+        from backend.utils.device import get_device, get_torch_dtype
+
+        self.torch = torch
+        self.auto_model = AutoModelForSeq2SeqLM
+        self.auto_tokenizer = AutoTokenizer
         self.device = get_device()
         self.torch_dtype = get_torch_dtype()
 
     def _load_from_local(self):
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self.tokenizer = self.auto_tokenizer.from_pretrained(
             LOCAL_MODEL_DIR,
             local_files_only=True,
         )
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+        self.model = self.auto_model.from_pretrained(
             LOCAL_MODEL_DIR,
             torch_dtype=self.torch_dtype,
             local_files_only=True,
@@ -47,11 +72,11 @@ class TranslationService:
     def _download_and_save_once(self):
         LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
+        self.tokenizer = self.auto_tokenizer.from_pretrained(
             self.model_name,
             token=HF_TOKEN,
         )
-        self.model = AutoModelForSeq2SeqLM.from_pretrained(
+        self.model = self.auto_model.from_pretrained(
             self.model_name,
             torch_dtype=self.torch_dtype,
             token=HF_TOKEN,
@@ -63,6 +88,8 @@ class TranslationService:
     def load(self, progress_callback=None):
         if self.model is not None:
             return
+
+        self._ensure_dependencies()
 
         if progress_callback:
             progress_callback("Loading translation model...")
@@ -109,7 +136,7 @@ class TranslationService:
             for key, value in inputs.items()
         }
 
-        with torch.no_grad():
+        with self.torch.no_grad():
             generated_tokens = self.model.generate(
                 **inputs,
                 forced_bos_token_id=forced_bos_token_id,
@@ -123,7 +150,7 @@ class TranslationService:
         )[0]
 
     def _chunk_text(self, text, max_chars=900):
-        sentences = re.split(r"(?<=[.!?。！？])\s+", text.strip())
+        sentences = re.split(r"(?<=[.!?])\s+", text.strip())
         chunks = []
         current = ""
 
@@ -163,5 +190,5 @@ class TranslationService:
         self.model = None
         self.tokenizer = None
 
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if self.torch is not None and self.torch.cuda.is_available():
+            self.torch.cuda.empty_cache()
