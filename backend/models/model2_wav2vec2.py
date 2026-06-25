@@ -37,17 +37,18 @@ class Wav2Vec2ASR:
 
     def _download_and_save_once(self):
         LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        hf_token = os.getenv("HF_TOKEN")
 
         print("Local Wav2Vec2 not found. Downloading once...")
 
         self.processor = AutoProcessor.from_pretrained(
             self.model_name,
-            token=HF_TOKEN,
+            token=hf_token,
         )
 
         self.model = AutoModelForCTC.from_pretrained(
             self.model_name,
-            token=HF_TOKEN,
+            token=hf_token,
             use_safetensors=True,
         )
 

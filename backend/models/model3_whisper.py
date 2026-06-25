@@ -40,6 +40,7 @@ class WhisperASR:
 
     def _download_and_save_once(self):
         LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
+        hf_token = os.getenv("HF_TOKEN")
 
         print("Local model not found. Downloading Whisper once...")
 
@@ -47,13 +48,13 @@ class WhisperASR:
             self.model_name,
             language="Vietnamese",
             task="transcribe",
-            token=HF_TOKEN,
+            token=hf_token,
         )
 
         model = WhisperForConditionalGeneration.from_pretrained(
             self.model_name,
             torch_dtype=self.torch_dtype,
-            token=HF_TOKEN,
+            token=hf_token,
         )
 
         processor.save_pretrained(LOCAL_MODEL_DIR)
