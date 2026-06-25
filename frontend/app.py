@@ -1,4 +1,5 @@
 from concurrent.futures import ThreadPoolExecutor
+import os
 import sys
 import tempfile
 import time
@@ -83,6 +84,29 @@ st.set_page_config(
 st.title("🎙️ Conversation Transcription Demo")
 st.caption("Giai đoạn 1: Thu âm hoặc upload audio, sau đó nhận dạng bằng Whisper")
 
+if sys.version_info[:2] != (3, 12):
+    st.warning(
+        "This project is configured for Python 3.12. "
+        f"You are running Python {sys.version_info.major}.{sys.version_info.minor}. "
+        "Create a Python 3.12 virtual environment before loading speech models."
+    )
+
+with st.sidebar:
+    st.subheader("Hugging Face")
+    hf_token = st.text_input(
+        "HF token",
+        value=os.getenv("HF_TOKEN", ""),
+        type="password",
+        help="Used only for this running app session when downloading models.",
+    )
+
+    if hf_token:
+        os.environ["HF_TOKEN"] = hf_token.strip()
+        st.success("HF token is set for this session.")
+    else:
+        os.environ.pop("HF_TOKEN", None)
+        st.info("Paste a token if model downloads require authentication.")
+
 if "model_manager" not in st.session_state:
     st.session_state.model_manager = ModelManager()
 
@@ -115,8 +139,8 @@ if "realtime_translation" not in st.session_state:
 
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
-    "Model 1 - CNN + BiLSTM + CTC (Coming soon)": "model1_cnn_bilstm_ctc",
-    "Model 2 - Simplified DeepSpeech (Coming soon)": "model2_deepspeech",
+    "Model 1 - CNN + BiLSTM + CTC": "model1_cnn_bilstm_ctc",
+    "Model 2 - Simplified DeepSpeech": "model2_deepspeech",
 }
 
 selected_label = st.selectbox("Chọn mô hình ASR", list(model_options.keys()))
@@ -138,13 +162,33 @@ if st.session_state.translation_target_language != target_language:
     st.session_state.translation = None
     st.session_state.translation_target_language = target_language
 
+translator_available_locally = (
+    st.session_state.translation_service.local_model_exists()
+)
+
+if translation_enabled:
+    if translator_available_locally:
+        st.info("Translator checkpoint found locally.")
+    else:
+        st.warning(
+            "Translator checkpoint was not found locally. It will be downloaded "
+            "automatically when you click Load Selected Model."
+        )
+
 status_box = st.empty()
 
 if st.button("Load Selected Model"):
     try:
         if translation_enabled:
-            status_box.info("Loading speech-to-text and translation models...")
-            with st.spinner("Loading speech-to-text and translation models..."):
+            if translator_available_locally:
+                load_message = "Loading speech-to-text and local translation models..."
+            else:
+                load_message = (
+                    "Loading speech-to-text model and downloading translation model..."
+                )
+
+            status_box.info(load_message)
+            with st.spinner(load_message):
                 with ThreadPoolExecutor(max_workers=2) as executor:
                     asr_future = executor.submit(
                         st.session_state.model_manager.load_model,
@@ -159,7 +203,7 @@ if st.button("Load Selected Model"):
 
             st.session_state.translation_model_loaded = True
             status_box.success(
-                f"{selected_label} and translation model loaded successfully."
+                f"{selected_label} and translator model are ready."
             )
         else:
             status_box.info("Loading speech-to-text model...")
@@ -185,7 +229,14 @@ st.divider()
 
 st.subheader("Real-time microphone transcription")
 
-if webrtc_streamer is None or WebRtcMode is None or np is None or sf is None:
+realtime_mode = st.selectbox(
+    "Realtime microphone mode",
+    ["Off", "On"],
+)
+
+if realtime_mode == "Off":
+    st.info("Realtime microphone streaming is off.")
+elif webrtc_streamer is None or WebRtcMode is None or np is None or sf is None:
     st.warning(
         "Real-time microphone mode requires streamlit-webrtc, numpy, and soundfile. "
         "Install the project dependencies, then restart Streamlit."
@@ -203,7 +254,8 @@ else:
         key="realtime-transcription",
         mode=WebRtcMode.SENDONLY,
         media_stream_constraints={"audio": True, "video": False},
-        audio_receiver_size=256,
+        audio_receiver_size=4096,
+        async_processing=True,
     )
 
     realtime_controls = st.columns(2)
@@ -306,8 +358,8 @@ if input_mode == "Thu âm trực tiếp":
         audio = None
     else:
         audio = mic_recorder(
-            start_prompt="Báº¯t Ä‘áº§u thu Ã¢m",
-            stop_prompt="Dá»«ng thu Ã¢m",
+            start_prompt="Start Recording",
+            stop_prompt="Stop Recording",
             just_once=False,
             use_container_width=True,
             format="wav",
