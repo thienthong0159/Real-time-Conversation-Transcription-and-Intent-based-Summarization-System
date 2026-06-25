@@ -1,7 +1,17 @@
 import re
+import unicodedata
 
 BLANK_TOKEN = "<blank>"
-DEFAULT_VOCAB = [BLANK_TOKEN] + list("abcdefghijklmnopqrstuvwxyz '")
+VIETNAMESE_CHARACTERS = (
+    "aàáảãạăằắẳẵặâầấẩẫậ"
+    "bcdđ"
+    "eèéẻẽẹêềếểễệ"
+    "fghiìíỉĩịjklmnoòóỏõọôồốổỗộơờớởỡợ"
+    "pqrstuùúủũụưừứửữự"
+    "vwxyỳýỷỹỵz"
+    " '"
+)
+DEFAULT_VOCAB = [BLANK_TOKEN] + list(dict.fromkeys(VIETNAMESE_CHARACTERS))
 
 
 class TextTransform:
@@ -10,10 +20,16 @@ class TextTransform:
         self.char_to_idx = {char: index for index, char in enumerate(self.vocab)}
         self.idx_to_char = {index: char for index, char in enumerate(self.vocab)}
         self.blank_index = self.char_to_idx[BLANK_TOKEN]
+        allowed_chars = "".join(
+            re.escape(char)
+            for char in self.vocab
+            if char != BLANK_TOKEN
+        )
+        self.allowed_pattern = re.compile(f"[^{allowed_chars}]+")
 
     def normalize(self, text):
-        text = text.lower().replace("\u2019", "'")
-        text = re.sub(r"[^a-z' ]+", " ", text)
+        text = unicodedata.normalize("NFC", text.lower().replace("\u2019", "'"))
+        text = self.allowed_pattern.sub(" ", text)
         return re.sub(r"\s+", " ", text).strip()
 
     def encode(self, text):
