@@ -1,10 +1,12 @@
 import os
 import re
+import shutil
 from pathlib import Path
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
 LOCAL_MODEL_DIR = ROOT_DIR / "checkpoints" / "nllb-200-distilled-600M"
+HF_CACHE_DIR = ROOT_DIR / "checkpoints" / "hf_cache"
 
 try:
     from dotenv import load_dotenv
@@ -13,9 +15,6 @@ except ImportError:
 
 if load_dotenv is not None:
     load_dotenv(ROOT_DIR / ".env")
-
-HF_TOKEN = os.getenv("HF_TOKEN")
-
 
 LANGUAGES = {
     "English": "eng_Latn",
@@ -36,6 +35,28 @@ class TranslationService:
         self.torch = None
         self.auto_model = None
         self.auto_tokenizer = None
+        self.snapshot_download = None
+
+    def local_model_exists(self):
+        if not LOCAL_MODEL_DIR.exists():
+            return False
+
+        has_config = (LOCAL_MODEL_DIR / "config.json").exists()
+        has_tokenizer = any(
+            (LOCAL_MODEL_DIR / filename).exists()
+            for filename in (
+                "tokenizer.json",
+                "sentencepiece.bpe.model",
+                "spm.model",
+            )
+        )
+        weight_patterns = ("*.safetensors", "pytorch_model*.bin")
+        has_weights = any(
+            weight_file.exists()
+            for pattern in weight_patterns
+            for weight_file in LOCAL_MODEL_DIR.glob(pattern)
+        )
+        return has_config and has_tokenizer and has_weights
 
     def _ensure_dependencies(self):
         if self.torch is not None:
@@ -43,10 +64,11 @@ class TranslationService:
 
         try:
             import torch
+            from huggingface_hub import snapshot_download
             from transformers import AutoModelForSeq2SeqLM, AutoTokenizer
         except ImportError as exc:
             raise RuntimeError(
-                "Translation requires torch and transformers. "
+                "Translation requires torch, transformers, and huggingface-hub. "
                 "Install the project dependencies with `uv sync` before using translation."
             ) from exc
 
@@ -55,6 +77,7 @@ class TranslationService:
         self.torch = torch
         self.auto_model = AutoModelForSeq2SeqLM
         self.auto_tokenizer = AutoTokenizer
+        self.snapshot_download = snapshot_download
         self.device = get_device()
         self.torch_dtype = get_torch_dtype()
 
@@ -69,18 +92,80 @@ class TranslationService:
             local_files_only=True,
         )
 
+    def _model_cache_dir(self):
+        cache_name = f"models--{self.model_name.replace('/', '--')}"
+        return HF_CACHE_DIR / cache_name
+
+    def _remove_project_dir(self, target_dir):
+        target_dir = target_dir.resolve()
+        checkpoints_dir = (ROOT_DIR / "checkpoints").resolve()
+
+        if target_dir.exists() and checkpoints_dir in target_dir.parents:
+            shutil.rmtree(target_dir)
+
+    def _clear_download_artifacts(self):
+        self._remove_project_dir(LOCAL_MODEL_DIR)
+        self._remove_project_dir(self._model_cache_dir())
+
+    def _download_snapshot_to_local_dir(self):
+        hf_token = os.getenv("HF_TOKEN")
+
+        self.snapshot_download(
+            repo_id=self.model_name,
+            local_dir=LOCAL_MODEL_DIR,
+            local_dir_use_symlinks=False,
+            token=hf_token,
+        )
+
+    def _download_pretrained(self):
+        self._download_snapshot_to_local_dir()
+
+        tokenizer = self.auto_tokenizer.from_pretrained(
+            LOCAL_MODEL_DIR,
+            local_files_only=True,
+        )
+        model = self.auto_model.from_pretrained(
+            LOCAL_MODEL_DIR,
+            torch_dtype=self.torch_dtype,
+            local_files_only=True,
+        )
+        return tokenizer, model
+
+    def _download_pretrained_via_cache(self, force_download=True):
+        HF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        hf_token = os.getenv("HF_TOKEN")
+
+        tokenizer = self.auto_tokenizer.from_pretrained(
+            self.model_name,
+            cache_dir=HF_CACHE_DIR,
+            force_download=force_download,
+            token=hf_token,
+        )
+        model = self.auto_model.from_pretrained(
+            self.model_name,
+            cache_dir=HF_CACHE_DIR,
+            force_download=force_download,
+            torch_dtype=self.torch_dtype,
+            token=hf_token,
+        )
+        return tokenizer, model
+
     def _download_and_save_once(self):
+        self._clear_download_artifacts()
         LOCAL_MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-        self.tokenizer = self.auto_tokenizer.from_pretrained(
-            self.model_name,
-            token=HF_TOKEN,
-        )
-        self.model = self.auto_model.from_pretrained(
-            self.model_name,
-            torch_dtype=self.torch_dtype,
-            token=HF_TOKEN,
-        )
+        try:
+            self.tokenizer, self.model = self._download_pretrained()
+        except Exception as exc:
+            self._clear_download_artifacts()
+            try:
+                self.tokenizer, self.model = self._download_pretrained_via_cache()
+            except Exception as fallback_exc:
+                self._clear_download_artifacts()
+                raise RuntimeError(
+                    "The NLLB translator model could not be downloaded. "
+                    f"Original error: {exc}. Fallback error: {fallback_exc}"
+                ) from fallback_exc
 
         self.tokenizer.save_pretrained(LOCAL_MODEL_DIR)
         self.model.save_pretrained(LOCAL_MODEL_DIR, safe_serialization=True)
@@ -91,14 +176,15 @@ class TranslationService:
 
         self._ensure_dependencies()
 
-        if progress_callback:
-            progress_callback("Loading translation model...")
-
-        try:
-            self._load_from_local()
-        except Exception:
+        if self.local_model_exists():
             if progress_callback:
-                progress_callback("Downloading translation model...")
+                progress_callback("Loading translation model from local checkpoint...")
+            self._load_from_local()
+        else:
+            if progress_callback:
+                progress_callback(
+                    "No local translation model found. Downloading NLLB translator..."
+                )
             self._download_and_save_once()
 
         self.model.to(self.device)
