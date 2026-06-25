@@ -8,6 +8,7 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
 from backend.model_manager import ModelManager
+from backend.services.translation import LANGUAGES, TranslationService
 
 import warnings
 
@@ -28,11 +29,23 @@ st.caption("Giai đoạn 1: Thu âm hoặc upload audio, sau đó nhận dạng 
 if "model_manager" not in st.session_state:
     st.session_state.model_manager = ModelManager()
 
+if "translation_service" not in st.session_state:
+    st.session_state.translation_service = TranslationService()
+
 if "loaded_model" not in st.session_state:
     st.session_state.loaded_model = None
 
 if "audio_path" not in st.session_state:
     st.session_state.audio_path = None
+
+if "transcript" not in st.session_state:
+    st.session_state.transcript = None
+
+if "translation" not in st.session_state:
+    st.session_state.translation = None
+
+if "translation_target_language" not in st.session_state:
+    st.session_state.translation_target_language = None
 
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
@@ -42,6 +55,20 @@ model_options = {
 
 selected_label = st.selectbox("Chọn mô hình ASR", list(model_options.keys()))
 selected_model = model_options[selected_label]
+
+translation_enabled = st.toggle(
+    "Translate transcript in real time",
+    value=True,
+)
+target_language_label = st.selectbox(
+    "Target translation language",
+    list(LANGUAGES.keys()),
+)
+target_language = LANGUAGES[target_language_label]
+
+if st.session_state.translation_target_language != target_language:
+    st.session_state.translation = None
+    st.session_state.translation_target_language = target_language
 
 status_box = st.empty()
 
@@ -97,6 +124,8 @@ if input_mode == "Thu âm trực tiếp":
             f.write(audio_bytes)
 
         st.session_state.audio_path = str(audio_path)
+        st.session_state.transcript = None
+        st.session_state.translation = None
         st.audio(audio_bytes, format="audio/wav")
 
 elif input_mode == "Upload file audio":
@@ -114,6 +143,8 @@ elif input_mode == "Upload file audio":
             f.write(uploaded_file.getbuffer())
 
         st.session_state.audio_path = str(audio_path)
+        st.session_state.transcript = None
+        st.session_state.translation = None
         st.audio(str(audio_path))
 
 st.divider()
@@ -132,10 +163,76 @@ if st.session_state.audio_path is not None:
                         st.session_state.audio_path
                     )
 
-                st.subheader("Vietnamese Transcript")
-                st.success(transcript)
+                st.session_state.transcript = transcript
+                st.session_state.translation = None
+
+                if translation_enabled and transcript.strip():
+                    translation_status = st.empty()
+
+                    def update_translation_status(message):
+                        translation_status.info(message)
+
+                    with st.spinner("Translating transcript..."):
+                        st.session_state.translation_service.load(
+                            progress_callback=update_translation_status,
+                        )
+                        st.session_state.translation = (
+                            st.session_state.translation_service.translate(
+                                transcript,
+                                target_lang=target_language,
+                            )
+                        )
+
+                    translation_status.success("Translation ready.")
 
             except Exception as e:
                 st.error(str(e))
+
+    if st.session_state.transcript:
+        transcript_column, translation_column = st.columns(2)
+
+        with transcript_column:
+            st.subheader("Vietnamese Transcript")
+            st.text_area(
+                "Transcript",
+                st.session_state.transcript,
+                height=220,
+                label_visibility="collapsed",
+            )
+
+        with translation_column:
+            st.subheader(f"{target_language_label} Translation")
+
+            if st.session_state.translation:
+                st.text_area(
+                    "Translation",
+                    st.session_state.translation,
+                    height=220,
+                    label_visibility="collapsed",
+                )
+            else:
+                st.info("No translation yet.")
+
+            if st.button("Translate latest transcript"):
+                try:
+                    translation_status = st.empty()
+
+                    def update_translation_status(message):
+                        translation_status.info(message)
+
+                    with st.spinner("Translating transcript..."):
+                        st.session_state.translation_service.load(
+                            progress_callback=update_translation_status,
+                        )
+                        st.session_state.translation = (
+                            st.session_state.translation_service.translate(
+                                st.session_state.transcript,
+                                target_lang=target_language,
+                            )
+                        )
+                    translation_status.success("Translation ready.")
+                    st.rerun()
+                except Exception as e:
+                    st.error(str(e))
 else:
     st.info("Hãy thu âm hoặc upload file audio trước.")
