@@ -2,13 +2,17 @@ import sys
 from pathlib import Path
 
 import streamlit as st
-from streamlit_mic_recorder import mic_recorder
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
 from backend.model_manager import ModelManager
 from backend.services.translation import LANGUAGES, TranslationService
+
+try:
+    from streamlit_mic_recorder import mic_recorder
+except ImportError:
+    mic_recorder = None
 
 import warnings
 
@@ -56,10 +60,12 @@ model_options = {
 selected_label = st.selectbox("Chọn mô hình ASR", list(model_options.keys()))
 selected_model = model_options[selected_label]
 
-translation_enabled = st.toggle(
-    "Translate transcript in real time",
-    value=True,
+translation_mode = st.selectbox(
+    "Translation mode",
+    ["Translate automatically", "Do not translate automatically"],
 )
+translation_enabled = translation_mode == "Translate automatically"
+
 target_language_label = st.selectbox(
     "Target translation language",
     list(LANGUAGES.keys()),
@@ -108,13 +114,20 @@ audio_path = None
 if input_mode == "Thu âm trực tiếp":
     st.subheader("Thu âm từ microphone")
 
-    audio = mic_recorder(
-        start_prompt="Bắt đầu thu âm",
-        stop_prompt="Dừng thu âm",
-        just_once=False,
-        use_container_width=True,
-        format="wav",
-    )
+    if mic_recorder is None:
+        st.warning(
+            "Microphone recording is unavailable because streamlit-mic-recorder "
+            "is not installed. Use audio upload or install the project dependencies."
+        )
+        audio = None
+    else:
+        audio = mic_recorder(
+            start_prompt="Báº¯t Ä‘áº§u thu Ã¢m",
+            stop_prompt="Dá»«ng thu Ã¢m",
+            just_once=False,
+            use_container_width=True,
+            format="wav",
+        )
 
     if audio is not None:
         audio_bytes = audio["bytes"]
