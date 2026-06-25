@@ -259,7 +259,7 @@ else:
     )
 
     realtime_controls = st.columns(2)
-    process_realtime = realtime_controls[0].button("Process live audio")
+    run_realtime = realtime_controls[0].button("Start live transcription")
     clear_realtime = realtime_controls[1].button("Clear live text")
 
     if clear_realtime:
@@ -268,74 +268,88 @@ else:
         st.rerun()
 
     realtime_status = st.empty()
+    realtime_transcript_column, realtime_translation_column = st.columns(2)
+    realtime_transcript_placeholder = realtime_transcript_column.empty()
+    realtime_translation_placeholder = realtime_translation_column.empty()
 
-    if process_realtime:
+    def render_realtime_text():
+        realtime_transcript_placeholder.text_area(
+            "Live Vietnamese Transcript",
+            st.session_state.realtime_transcript,
+            height=180,
+        )
+        realtime_translation_placeholder.text_area(
+            f"Live {target_language_label} Translation",
+            st.session_state.realtime_translation,
+            height=180,
+        )
+
+    render_realtime_text()
+
+    if run_realtime:
         if st.session_state.loaded_model is None:
             realtime_status.warning("Load the speech-to-text model first.")
         elif realtime_ctx.audio_receiver is None:
             realtime_status.warning("Start the microphone stream first.")
         else:
-            frames = []
-            started_at = time.time()
-            realtime_status.info("Listening to live audio chunk...")
+            realtime_status.info(
+                "Listening continuously. Stop the microphone stream to end."
+            )
 
-            while time.time() - started_at < realtime_chunk_seconds:
-                try:
-                    frames.extend(realtime_ctx.audio_receiver.get_frames(timeout=1))
-                except Exception:
-                    pass
+            while realtime_ctx.state.playing:
+                frames = []
+                started_at = time.time()
 
-            if not frames:
-                realtime_status.warning("No live audio frames received.")
-            else:
+                while time.time() - started_at < realtime_chunk_seconds:
+                    if not realtime_ctx.state.playing:
+                        break
+                    try:
+                        frames.extend(
+                            realtime_ctx.audio_receiver.get_frames(timeout=1)
+                        )
+                    except Exception:
+                        pass
+
+                if not frames:
+                    continue
+
                 temp_audio_path = audio_frames_to_wav(frames)
 
                 if temp_audio_path is None:
-                    realtime_status.warning("Could not build an audio chunk.")
-                else:
-                    try:
-                        with st.spinner("Transcribing live audio chunk..."):
-                            chunk_transcript, chunk_translation = (
-                                transcribe_and_translate_chunk(
-                                    temp_audio_path,
-                                    target_language,
-                                    translation_enabled,
-                                )
-                            )
+                    continue
 
-                        if chunk_transcript:
-                            st.session_state.realtime_transcript = (
-                                f"{st.session_state.realtime_transcript} "
-                                f"{chunk_transcript}"
-                            ).strip()
+                try:
+                    chunk_transcript, chunk_translation = (
+                        transcribe_and_translate_chunk(
+                            temp_audio_path,
+                            target_language,
+                            translation_enabled,
+                        )
+                    )
 
-                        if chunk_translation:
-                            st.session_state.realtime_translation = (
-                                f"{st.session_state.realtime_translation} "
-                                f"{chunk_translation}"
-                            ).strip()
+                    if chunk_transcript:
+                        st.session_state.realtime_transcript = (
+                            f"{st.session_state.realtime_transcript} "
+                            f"{chunk_transcript}"
+                        ).strip()
 
-                        realtime_status.success("Live chunk processed.")
-                    except Exception as e:
-                        realtime_status.error(str(e))
-                    finally:
-                        temp_audio_path.unlink(missing_ok=True)
+                    if chunk_translation:
+                        st.session_state.realtime_translation = (
+                            f"{st.session_state.realtime_translation} "
+                            f"{chunk_translation}"
+                        ).strip()
 
-    realtime_transcript_column, realtime_translation_column = st.columns(2)
+                    render_realtime_text()
+                    realtime_status.success(
+                        f"Updated at {time.strftime('%H:%M:%S')}"
+                    )
+                except Exception as e:
+                    realtime_status.error(str(e))
+                    break
+                finally:
+                    temp_audio_path.unlink(missing_ok=True)
 
-    with realtime_transcript_column:
-        st.text_area(
-            "Live Vietnamese Transcript",
-            st.session_state.realtime_transcript,
-            height=180,
-        )
-
-    with realtime_translation_column:
-        st.text_area(
-            f"Live {target_language_label} Translation",
-            st.session_state.realtime_translation,
-            height=180,
-        )
+            realtime_status.info("Live transcription stopped.")
 
 st.divider()
 
