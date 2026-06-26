@@ -137,6 +137,15 @@ if "realtime_transcript" not in st.session_state:
 if "realtime_translation" not in st.session_state:
     st.session_state.realtime_translation = ""
 
+if "realtime_running" not in st.session_state:
+    st.session_state.realtime_running = False
+
+if "realtime_pending_translation" not in st.session_state:
+    st.session_state.realtime_pending_translation = ""
+
+if "realtime_last_translation_at" not in st.session_state:
+    st.session_state.realtime_last_translation_at = time.time()
+
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
     "Model 1 - CNN + BiLSTM + CTC": "model1_cnn_bilstm_ctc",
@@ -265,131 +274,127 @@ else:
         async_processing=True,
     )
 
-    realtime_controls = st.columns(2)
-    run_realtime = realtime_controls[0].button("Start live transcription")
-    clear_realtime = realtime_controls[1].button("Clear live text")
+    realtime_controls = st.columns(3)
+    start_realtime = realtime_controls[0].button("Start live transcription")
+    stop_realtime = realtime_controls[1].button("Stop live transcription")
+    clear_realtime = realtime_controls[2].button("Clear live text")
+
+    if start_realtime:
+        st.session_state.realtime_running = True
+        st.session_state.realtime_last_translation_at = time.time()
+
+    if stop_realtime:
+        st.session_state.realtime_running = False
 
     if clear_realtime:
         st.session_state.realtime_transcript = ""
         st.session_state.realtime_translation = ""
+        st.session_state.realtime_pending_translation = ""
         st.rerun()
 
     realtime_status = st.empty()
     realtime_transcript_column, realtime_translation_column = st.columns(2)
+    realtime_transcript_column.markdown("**Live Vietnamese Transcript**")
+    realtime_translation_column.markdown(f"**Live {target_language_label} Translation**")
     realtime_transcript_placeholder = realtime_transcript_column.empty()
     realtime_translation_placeholder = realtime_translation_column.empty()
 
     def render_realtime_text():
-        realtime_transcript_placeholder.text_area(
-            "Live Vietnamese Transcript",
-            st.session_state.realtime_transcript,
-            height=180,
+        realtime_transcript_placeholder.code(
+            st.session_state.realtime_transcript or " ",
+            language=None,
         )
-        realtime_translation_placeholder.text_area(
-            f"Live {target_language_label} Translation",
-            st.session_state.realtime_translation,
-            height=180,
+        realtime_translation_placeholder.code(
+            st.session_state.realtime_translation or " ",
+            language=None,
         )
 
     render_realtime_text()
 
-    if run_realtime:
+    if st.session_state.realtime_running:
         if st.session_state.loaded_model is None:
             realtime_status.warning("Load the speech-to-text model first.")
+            st.session_state.realtime_running = False
         elif realtime_ctx.audio_receiver is None:
             realtime_status.warning("Start the microphone stream first.")
+            st.session_state.realtime_running = False
+        elif not realtime_ctx.state.playing:
+            realtime_status.warning("Microphone stream is stopped.")
+            st.session_state.realtime_running = False
         else:
             realtime_status.info(
-                "Listening continuously. Stop the microphone stream to end."
+                "Listening continuously. Click Stop live transcription to end."
             )
-            pending_translation_text = ""
-            last_translation_at = time.time()
+            frames = []
+            started_at = time.time()
 
-            while realtime_ctx.state.playing:
-                frames = []
-                started_at = time.time()
+            while time.time() - started_at < realtime_chunk_seconds:
+                if not realtime_ctx.state.playing:
+                    st.session_state.realtime_running = False
+                    break
+                try:
+                    frames.extend(
+                        realtime_ctx.audio_receiver.get_frames(timeout=1)
+                    )
+                except Exception:
+                    pass
 
-                while time.time() - started_at < realtime_chunk_seconds:
-                    if not realtime_ctx.state.playing:
-                        break
-                    try:
-                        frames.extend(
-                            realtime_ctx.audio_receiver.get_frames(timeout=1)
-                        )
-                    except Exception:
-                        pass
-
-                if not frames:
-                    continue
-
+            if frames:
                 temp_audio_path = audio_frames_to_wav(frames)
 
-                if temp_audio_path is None:
-                    continue
-
-                try:
-                    chunk_transcript = st.session_state.model_manager.transcribe(
-                        str(temp_audio_path)
-                    )
-                    chunk_translation = ""
-
-                    if chunk_transcript:
-                        st.session_state.realtime_transcript = (
-                            f"{st.session_state.realtime_transcript} "
-                            f"{chunk_transcript}"
-                        ).strip()
-                        pending_translation_text = (
-                            f"{pending_translation_text} {chunk_transcript}"
-                        ).strip()
-
-                    should_translate = (
-                        translation_enabled
-                        and pending_translation_text
-                        and time.time() - last_translation_at >= realtime_translation_seconds
-                    )
-
-                    if should_translate:
-                        st.session_state.translation_service.load()
-                        chunk_translation = st.session_state.translation_service.translate(
-                            pending_translation_text,
-                            target_lang=target_language,
+                if temp_audio_path is not None:
+                    try:
+                        chunk_transcript = st.session_state.model_manager.transcribe(
+                            str(temp_audio_path)
                         )
-                        pending_translation_text = ""
-                        last_translation_at = time.time()
+                        chunk_translation = ""
 
-                        if chunk_translation:
-                            st.session_state.realtime_translation = (
-                                f"{st.session_state.realtime_translation} "
-                                f"{chunk_translation}"
+                        if chunk_transcript:
+                            st.session_state.realtime_transcript = (
+                                f"{st.session_state.realtime_transcript} "
+                                f"{chunk_transcript}"
+                            ).strip()
+                            st.session_state.realtime_pending_translation = (
+                                f"{st.session_state.realtime_pending_translation} "
+                                f"{chunk_transcript}"
                             ).strip()
 
-                    render_realtime_text()
-                    realtime_status.success(
-                        f"Updated at {time.strftime('%H:%M:%S')}"
-                    )
-                except Exception as e:
-                    realtime_status.error(str(e))
-                    break
-                finally:
-                    temp_audio_path.unlink(missing_ok=True)
+                        should_translate = (
+                            translation_enabled
+                            and st.session_state.realtime_pending_translation
+                            and time.time() - st.session_state.realtime_last_translation_at
+                            >= realtime_translation_seconds
+                        )
 
-            if translation_enabled and pending_translation_text:
-                try:
-                    st.session_state.translation_service.load()
-                    final_translation = st.session_state.translation_service.translate(
-                        pending_translation_text,
-                        target_lang=target_language,
-                    )
-                    if final_translation:
-                        st.session_state.realtime_translation = (
-                            f"{st.session_state.realtime_translation} "
-                            f"{final_translation}"
-                        ).strip()
+                        if should_translate:
+                            st.session_state.translation_service.load()
+                            chunk_translation = st.session_state.translation_service.translate(
+                                st.session_state.realtime_pending_translation,
+                                target_lang=target_language,
+                            )
+                            st.session_state.realtime_pending_translation = ""
+                            st.session_state.realtime_last_translation_at = time.time()
+
+                            if chunk_translation:
+                                st.session_state.realtime_translation = (
+                                    f"{st.session_state.realtime_translation} "
+                                    f"{chunk_translation}"
+                                ).strip()
+
                         render_realtime_text()
-                except Exception as e:
-                    realtime_status.error(str(e))
+                        realtime_status.success(
+                            f"Updated at {time.strftime('%H:%M:%S')}"
+                        )
+                    except Exception as e:
+                        realtime_status.error(str(e))
+                        st.session_state.realtime_running = False
+                    finally:
+                        temp_audio_path.unlink(missing_ok=True)
 
-            realtime_status.info("Live transcription stopped.")
+            if st.session_state.realtime_running:
+                st.rerun()
+    else:
+        realtime_status.info("Live transcription is stopped.")
 
 st.divider()
 
