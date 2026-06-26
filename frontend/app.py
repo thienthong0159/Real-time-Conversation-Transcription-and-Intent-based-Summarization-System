@@ -1,8 +1,11 @@
 from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import os
+import re
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 
 import streamlit as st
@@ -11,12 +14,22 @@ ROOT_DIR = Path(__file__).resolve().parents[1]
 sys.path.append(str(ROOT_DIR))
 
 from backend.model_manager import ModelManager
+from backend.models.model_1.metrics import (
+    char_error_rate,
+    real_time_factor,
+    word_error_rate,
+)
 from backend.services.translation import LANGUAGES, TranslationService
 
 try:
     from streamlit_mic_recorder import mic_recorder
 except ImportError:
     mic_recorder = None
+
+try:
+    import librosa
+except ImportError:
+    librosa = None
 
 try:
     import numpy as np
@@ -87,6 +100,35 @@ def audio_rms(audio):
     return float(np.sqrt(np.mean(np.square(audio))))
 
 
+def get_audio_duration_seconds(audio_path):
+    try:
+        if librosa is not None:
+            return float(librosa.get_duration(path=str(audio_path)))
+
+        if sf is not None:
+            info = sf.info(str(audio_path))
+            return float(info.frames / info.samplerate)
+    except Exception:
+        return None
+
+    return None
+
+
+def normalize_metric_text(text):
+    text = unicodedata.normalize("NFC", text or "").casefold()
+    text = re.sub(r"[^\w\s\u00C0-\u1EF9]", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def format_metric_percent(value):
+    return f"{value * 100:.2f}%"
+
+
+def audio_bytes_signature(source_name, audio_bytes):
+    digest = hashlib.sha256(audio_bytes).hexdigest()
+    return f"{source_name}:{len(audio_bytes)}:{digest}"
+
+
 def append_with_overlap_cleanup(current_text, new_text, max_overlap_words=12):
     current_words = current_text.split()
     new_words = new_text.split()
@@ -147,8 +189,12 @@ init_session_state("model_manager", ModelManager)
 init_session_state("translation_service", TranslationService)
 init_session_state("loaded_model", lambda: None)
 init_session_state("audio_path", lambda: None)
+init_session_state("audio_signature", lambda: None)
 init_session_state("transcript", lambda: None)
 init_session_state("translation", lambda: None)
+init_session_state("reference_transcript", str)
+init_session_state("transcription_seconds", lambda: None)
+init_session_state("audio_duration_seconds", lambda: None)
 init_session_state("translation_target_language", lambda: None)
 init_session_state("translation_model_loaded", lambda: False)
 init_session_state("realtime_transcript", str)
@@ -507,13 +553,18 @@ if input_mode == "Thu âm trực tiếp":
     if audio is not None:
         audio_bytes = audio["bytes"]
         audio_path = UPLOAD_DIR / "recorded_audio.wav"
+        audio_signature = audio_bytes_signature("microphone", audio_bytes)
 
-        with open(audio_path, "wb") as f:
-            f.write(audio_bytes)
+        if st.session_state.audio_signature != audio_signature:
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
 
-        st.session_state.audio_path = str(audio_path)
-        st.session_state.transcript = None
-        st.session_state.translation = None
+            st.session_state.audio_path = str(audio_path)
+            st.session_state.audio_signature = audio_signature
+            st.session_state.transcript = None
+            st.session_state.translation = None
+            st.session_state.transcription_seconds = None
+            st.session_state.audio_duration_seconds = None
         st.audio(audio_bytes, format="audio/wav")
 
 elif input_mode == "Upload file audio":
@@ -526,13 +577,19 @@ elif input_mode == "Upload file audio":
 
     if uploaded_file is not None:
         audio_path = UPLOAD_DIR / uploaded_file.name
+        audio_bytes = uploaded_file.getvalue()
+        audio_signature = audio_bytes_signature(uploaded_file.name, audio_bytes)
 
-        with open(audio_path, "wb") as f:
-            f.write(uploaded_file.getbuffer())
+        if st.session_state.audio_signature != audio_signature:
+            with open(audio_path, "wb") as f:
+                f.write(audio_bytes)
 
-        st.session_state.audio_path = str(audio_path)
-        st.session_state.transcript = None
-        st.session_state.translation = None
+            st.session_state.audio_path = str(audio_path)
+            st.session_state.audio_signature = audio_signature
+            st.session_state.transcript = None
+            st.session_state.translation = None
+            st.session_state.transcription_seconds = None
+            st.session_state.audio_duration_seconds = None
         st.audio(str(audio_path))
 
 st.divider()
@@ -547,12 +604,20 @@ if st.session_state.audio_path is not None:
         else:
             try:
                 with st.spinner("Đang nhận dạng..."):
+                    transcription_started_at = time.perf_counter()
                     transcript = st.session_state.model_manager.transcribe(
                         st.session_state.audio_path
+                    )
+                    transcription_seconds = (
+                        time.perf_counter() - transcription_started_at
                     )
 
                 st.session_state.transcript = transcript
                 st.session_state.translation = None
+                st.session_state.transcription_seconds = transcription_seconds
+                st.session_state.audio_duration_seconds = (
+                    get_audio_duration_seconds(st.session_state.audio_path)
+                )
 
                 if translation_enabled and transcript.strip():
                     translation_status = st.empty()
@@ -622,5 +687,51 @@ if st.session_state.audio_path is not None:
                     st.rerun()
                 except Exception as e:
                     st.error(str(e))
+
+        st.subheader("Model evaluation")
+        reference_transcript = st.text_area(
+            "Reference transcript for WER",
+            key="reference_transcript",
+            height=120,
+            help="Paste the correct Vietnamese transcript here to calculate WER.",
+        )
+
+        normalized_reference = normalize_metric_text(reference_transcript)
+        normalized_hypothesis = normalize_metric_text(st.session_state.transcript)
+        rtf = real_time_factor(
+            st.session_state.transcription_seconds,
+            st.session_state.audio_duration_seconds,
+        )
+
+        metric_columns = st.columns(5)
+        if normalized_reference:
+            wer = word_error_rate(normalized_reference, normalized_hypothesis)
+            cer = char_error_rate(normalized_reference, normalized_hypothesis)
+            metric_columns[0].metric("WER", format_metric_percent(wer))
+            metric_columns[1].metric("CER", format_metric_percent(cer))
+        else:
+            metric_columns[0].metric("WER", "Add reference")
+            metric_columns[1].metric("CER", "Add reference")
+
+        metric_columns[2].metric(
+            "RTF",
+            f"{rtf:.3f}" if rtf is not None else "N/A",
+        )
+        metric_columns[3].metric(
+            "Audio duration",
+            (
+                f"{st.session_state.audio_duration_seconds:.2f}s"
+                if st.session_state.audio_duration_seconds is not None
+                else "N/A"
+            ),
+        )
+        metric_columns[4].metric(
+            "Processing time",
+            (
+                f"{st.session_state.transcription_seconds:.2f}s"
+                if st.session_state.transcription_seconds is not None
+                else "N/A"
+            ),
+        )
 else:
     st.info("Hãy thu âm hoặc upload file audio trước.")
