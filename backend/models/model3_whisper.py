@@ -118,7 +118,9 @@ class WhisperASR:
         with torch.no_grad():
             predicted_ids = self.model.generate(
                 input_features,
-                max_length=128,
+                max_new_tokens=96,
+                num_beams=3,
+                no_repeat_ngram_size=3,
             )
 
         text = self.processor.batch_decode(
