@@ -37,6 +37,14 @@ UPLOAD_DIR.mkdir(exist_ok=True)
 
 
 def audio_frames_to_wav(frames):
+    audio, sample_rate = audio_frames_to_audio(frames)
+    if audio is None:
+        return None
+
+    return write_audio_to_wav(audio, sample_rate)
+
+
+def audio_frames_to_audio(frames):
     arrays = []
     sample_rate = None
 
@@ -44,17 +52,28 @@ def audio_frames_to_wav(frames):
         array = frame.to_ndarray()
         if array.ndim == 2:
             array = array.mean(axis=0)
-        arrays.append(array.astype("float32"))
+
+        if np.issubdtype(array.dtype, np.integer):
+            dtype_max = max(abs(np.iinfo(array.dtype).min), np.iinfo(array.dtype).max)
+            array = array.astype("float32") / dtype_max
+        else:
+            array = array.astype("float32")
+
+        arrays.append(array)
         sample_rate = frame.sample_rate
 
     if not arrays or sample_rate is None:
-        return None
+        return None, None
 
     audio = np.concatenate(arrays)
     max_value = np.max(np.abs(audio)) if audio.size else 0
     if max_value > 1:
         audio = audio / max_value
 
+    return audio, sample_rate
+
+
+def write_audio_to_wav(audio, sample_rate):
     temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     temp_path = Path(temp_file.name)
     temp_file.close()
@@ -62,18 +81,35 @@ def audio_frames_to_wav(frames):
     return temp_path
 
 
-def transcribe_and_translate_chunk(audio_path, target_language, translation_enabled):
-    transcript = st.session_state.model_manager.transcribe(str(audio_path))
-    translation = ""
+def audio_rms(audio):
+    if audio is None or not audio.size:
+        return 0
+    return float(np.sqrt(np.mean(np.square(audio))))
 
-    if translation_enabled and transcript.strip():
-        st.session_state.translation_service.load()
-        translation = st.session_state.translation_service.translate(
-            transcript,
-            target_lang=target_language,
-        )
 
-    return transcript, translation
+def append_with_overlap_cleanup(current_text, new_text, max_overlap_words=12):
+    current_words = current_text.split()
+    new_words = new_text.split()
+
+    if not current_words:
+        return new_text.strip()
+    if not new_words:
+        return current_text.strip()
+
+    max_overlap = min(max_overlap_words, len(current_words), len(new_words))
+    for overlap in range(max_overlap, 0, -1):
+        current_tail = " ".join(current_words[-overlap:]).casefold()
+        new_head = " ".join(new_words[:overlap]).casefold()
+        if current_tail == new_head:
+            merged_words = current_words + new_words[overlap:]
+            return " ".join(merged_words).strip()
+
+    return f"{current_text} {new_text}".strip()
+
+
+def init_session_state(key, default_factory):
+    if key not in st.session_state:
+        st.session_state[key] = default_factory()
 
 st.set_page_config(
     page_title="Conversation Transcription",
@@ -107,49 +143,26 @@ with st.sidebar:
         os.environ.pop("HF_TOKEN", None)
         st.info("Paste a token if model downloads require authentication.")
 
-if "model_manager" not in st.session_state:
-    st.session_state.model_manager = ModelManager()
-
-if "translation_service" not in st.session_state:
-    st.session_state.translation_service = TranslationService()
-
-if "loaded_model" not in st.session_state:
-    st.session_state.loaded_model = None
-
-if "audio_path" not in st.session_state:
-    st.session_state.audio_path = None
-
-if "transcript" not in st.session_state:
-    st.session_state.transcript = None
-
-if "translation" not in st.session_state:
-    st.session_state.translation = None
-
-if "translation_target_language" not in st.session_state:
-    st.session_state.translation_target_language = None
-
-if "translation_model_loaded" not in st.session_state:
-    st.session_state.translation_model_loaded = False
-
-if "realtime_transcript" not in st.session_state:
-    st.session_state.realtime_transcript = ""
-
-if "realtime_translation" not in st.session_state:
-    st.session_state.realtime_translation = ""
-
-if "realtime_running" not in st.session_state:
-    st.session_state.realtime_running = False
-
-if "realtime_pending_translation" not in st.session_state:
-    st.session_state.realtime_pending_translation = ""
-
-if "realtime_last_translation_at" not in st.session_state:
-    st.session_state.realtime_last_translation_at = time.time()
+init_session_state("model_manager", ModelManager)
+init_session_state("translation_service", TranslationService)
+init_session_state("loaded_model", lambda: None)
+init_session_state("audio_path", lambda: None)
+init_session_state("transcript", lambda: None)
+init_session_state("translation", lambda: None)
+init_session_state("translation_target_language", lambda: None)
+init_session_state("translation_model_loaded", lambda: False)
+init_session_state("realtime_transcript", str)
+init_session_state("realtime_translation", str)
+init_session_state("realtime_running", lambda: False)
+init_session_state("realtime_pending_translation", str)
+init_session_state("realtime_last_translation_at", time.time)
+init_session_state("realtime_audio_tail", lambda: None)
+init_session_state("realtime_audio_tail_rate", lambda: None)
 
 model_options = {
     "Model 3 - Whisper Seq2Seq Encoder-Decoder": "model3_whisper",
     "Model 1 - CNN + BiLSTM + CTC": "model1_cnn_bilstm_ctc",
-    "Model 2 - Simplified DeepSpeech": "model2_deepspeech",
+    "Model 2 - Wav2Vec2 Vietnamese": "model2_deepspeech",
 }
 
 selected_label = st.selectbox("Chọn mô hình ASR", list(model_options.keys()))
@@ -244,6 +257,7 @@ realtime_mode = st.selectbox(
 )
 
 if realtime_mode == "Off":
+    st.session_state.realtime_running = False
     st.info("Realtime microphone streaming is off.")
 elif webrtc_streamer is None or WebRtcMode is None or np is None or sf is None:
     st.warning(
@@ -254,7 +268,21 @@ else:
     realtime_chunk_seconds = int(
         st.selectbox(
             "Realtime chunk length",
-            ["1", "2", "3", "5", "8", "10"],
+            ["3", "5", "8", "10", "15"],
+            index=1,
+        )
+    )
+    realtime_context_seconds = int(
+        st.selectbox(
+            "Realtime context overlap",
+            ["0", "1", "2", "3", "5"],
+            index=2,
+        )
+    )
+    realtime_silence_threshold = float(
+        st.selectbox(
+            "Realtime silence filter",
+            ["0.003", "0.005", "0.010", "0.020"],
             index=1,
         )
     )
@@ -290,12 +318,16 @@ else:
         st.session_state.realtime_transcript = ""
         st.session_state.realtime_translation = ""
         st.session_state.realtime_pending_translation = ""
+        st.session_state.realtime_audio_tail = None
+        st.session_state.realtime_audio_tail_rate = None
         st.rerun()
 
     realtime_status = st.empty()
     realtime_transcript_column, realtime_translation_column = st.columns(2)
     realtime_transcript_column.markdown("**Live Vietnamese Transcript**")
-    realtime_translation_column.markdown(f"**Live {target_language_label} Translation**")
+    realtime_translation_column.markdown(
+        f"**Live {target_language_label} Translation**"
+    )
     realtime_transcript_placeholder = realtime_transcript_column.empty()
     realtime_translation_placeholder = realtime_translation_column.empty()
 
@@ -314,13 +346,14 @@ else:
     if st.session_state.realtime_running:
         if st.session_state.loaded_model is None:
             realtime_status.warning("Load the speech-to-text model first.")
-            st.session_state.realtime_running = False
         elif realtime_ctx.audio_receiver is None:
-            realtime_status.warning("Start the microphone stream first.")
-            st.session_state.realtime_running = False
+            realtime_status.warning(
+                "Live transcription is armed. Start the microphone stream to begin."
+            )
         elif not realtime_ctx.state.playing:
-            realtime_status.warning("Microphone stream is stopped.")
-            st.session_state.realtime_running = False
+            realtime_status.warning(
+                "Live transcription is armed. Waiting for the microphone stream."
+            )
         else:
             realtime_status.info(
                 "Listening continuously. Click Stop live transcription to end."
@@ -330,7 +363,6 @@ else:
 
             while time.time() - started_at < realtime_chunk_seconds:
                 if not realtime_ctx.state.playing:
-                    st.session_state.realtime_running = False
                     break
                 try:
                     frames.extend(
@@ -340,9 +372,40 @@ else:
                     pass
 
             if frames:
-                temp_audio_path = audio_frames_to_wav(frames)
+                chunk_audio, chunk_sample_rate = audio_frames_to_audio(frames)
 
-                if temp_audio_path is not None:
+                if chunk_audio is not None:
+                    speech_seconds = len(chunk_audio) / chunk_sample_rate
+                    speech_level = audio_rms(chunk_audio)
+                    has_enough_speech = (
+                        speech_seconds >= 0.75
+                        and speech_level >= realtime_silence_threshold
+                    )
+
+                    if not has_enough_speech:
+                        realtime_status.info(
+                            "Listening. Skipped a quiet chunk "
+                            f"(level {speech_level:.4f})."
+                        )
+                        st.rerun()
+
+                    tail_audio = st.session_state.realtime_audio_tail
+                    tail_rate = st.session_state.realtime_audio_tail_rate
+
+                    if (
+                        tail_audio is not None
+                        and tail_rate == chunk_sample_rate
+                        and realtime_context_seconds > 0
+                    ):
+                        model_audio = np.concatenate([tail_audio, chunk_audio])
+                    else:
+                        model_audio = chunk_audio
+
+                    temp_audio_path = write_audio_to_wav(
+                        model_audio,
+                        chunk_sample_rate,
+                    )
+
                     try:
                         chunk_transcript = st.session_state.model_manager.transcribe(
                             str(temp_audio_path)
@@ -351,13 +414,17 @@ else:
 
                         if chunk_transcript:
                             st.session_state.realtime_transcript = (
-                                f"{st.session_state.realtime_transcript} "
-                                f"{chunk_transcript}"
-                            ).strip()
+                                append_with_overlap_cleanup(
+                                    st.session_state.realtime_transcript,
+                                    chunk_transcript,
+                                )
+                            )
                             st.session_state.realtime_pending_translation = (
-                                f"{st.session_state.realtime_pending_translation} "
-                                f"{chunk_transcript}"
-                            ).strip()
+                                append_with_overlap_cleanup(
+                                    st.session_state.realtime_pending_translation,
+                                    chunk_transcript,
+                                )
+                            )
 
                         should_translate = (
                             translation_enabled
@@ -383,13 +450,26 @@ else:
 
                         render_realtime_text()
                         realtime_status.success(
-                            f"Updated at {time.strftime('%H:%M:%S')}"
+                            "Updated at "
+                            f"{time.strftime('%H:%M:%S')} "
+                            f"(level {speech_level:.4f})"
                         )
                     except Exception as e:
                         realtime_status.error(str(e))
-                        st.session_state.realtime_running = False
                     finally:
                         temp_audio_path.unlink(missing_ok=True)
+
+                    if realtime_context_seconds > 0:
+                        tail_samples = int(
+                            chunk_sample_rate * realtime_context_seconds
+                        )
+                        st.session_state.realtime_audio_tail = chunk_audio[
+                            -tail_samples:
+                        ]
+                        st.session_state.realtime_audio_tail_rate = chunk_sample_rate
+                    else:
+                        st.session_state.realtime_audio_tail = None
+                        st.session_state.realtime_audio_tail_rate = None
 
             if st.session_state.realtime_running:
                 st.rerun()
