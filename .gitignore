@@ -1,3 +1,22 @@
-checkpoints/
-external/
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtual env
+.venv/
+venv/
+
+# PyInstaller
+build/
 dist/
+*.spec
+
+# Model
+checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
