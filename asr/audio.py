@@ -1,73 +1,57 @@
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
-from tempfile import NamedTemporaryFile
-from typing import BinaryIO
+from typing import Any
 
 import librosa
 import numpy as np
 import soundfile as sf
 
-
-SUPPORTED_AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a"}
 TARGET_SAMPLE_RATE = 16_000
 
 
-def save_uploaded_audio(uploaded_file: BinaryIO, suffix: str) -> str:
-    suffix = suffix.lower()
-    if suffix not in SUPPORTED_AUDIO_SUFFIXES:
-        raise ValueError(
-            f"Unsupported audio format '{suffix}'. Upload wav, mp3, or m4a audio."
-        )
-
-    with NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer())
-        return tmp.name
-
-
-def load_audio_mono(audio: str | tuple[int, object], sr: int = TARGET_SAMPLE_RATE) -> np.ndarray:
+def load_audio_mono(audio: str | Path | tuple[int, Any]) -> np.ndarray:
+    """Decode an audio path or Streamlit microphone tuple to 16 kHz mono float32."""
     if isinstance(audio, tuple):
-        source_sr, samples = audio
-        array = np.asarray(samples, dtype=np.float32)
-        if array.ndim > 1:
-            array = np.mean(array, axis=1)
-        if source_sr != sr:
-            array = librosa.resample(array, orig_sr=source_sr, target_sr=sr)
-        return normalize_audio(array)
+        sample_rate, samples = audio
+        data = np.asarray(samples, dtype=np.float32)
+        if data.ndim == 2:
+            # PyAV frames are usually (channels, samples); other callers often
+            # provide (samples, channels).
+            data = data.mean(axis=0 if data.shape[0] <= data.shape[1] else 1)
+        if np.issubdtype(np.asarray(samples).dtype, np.integer):
+            data /= np.iinfo(np.asarray(samples).dtype).max
+        if sample_rate != TARGET_SAMPLE_RATE:
+            data = librosa.resample(data, orig_sr=sample_rate, target_sr=TARGET_SAMPLE_RATE)
+        return np.ascontiguousarray(data, dtype=np.float32)
 
-    path = Path(audio)
-    if path.suffix.lower() not in SUPPORTED_AUDIO_SUFFIXES:
-        raise ValueError(
-            f"Unsupported audio format '{path.suffix}'. Use wav, mp3, or m4a."
-        )
-
-    array, _ = librosa.load(path, sr=sr, mono=True)
-    return normalize_audio(array)
-
-
-def normalize_audio(samples: np.ndarray) -> np.ndarray:
-    samples = np.asarray(samples, dtype=np.float32)
-    if samples.size == 0:
-        return samples
-    peak = float(np.max(np.abs(samples)))
-    if peak > 1.0:
-        samples = samples / peak
-    return samples
+    samples, _ = librosa.load(str(audio), sr=TARGET_SAMPLE_RATE, mono=True, dtype=np.float32)
+    if not samples.size:
+        raise ValueError("The audio contains no samples.")
+    return np.ascontiguousarray(samples, dtype=np.float32)
 
 
-def write_temp_wav(samples: np.ndarray, sample_rate: int = TARGET_SAMPLE_RATE) -> str:
-    with NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-        sf.write(tmp.name, samples, sample_rate)
-        return tmp.name
+def write_temp_wav(samples: np.ndarray) -> str:
+    """Persist normalized audio for backends that expect a filename."""
+    handle = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+    handle.close()
+    sf.write(handle.name, samples, TARGET_SAMPLE_RATE, subtype="PCM_16")
+    return handle.name
 
 
-def has_speech(
-    samples: np.ndarray,
-    rms_threshold: float = 0.008,
-    min_duration_seconds: float = 0.75,
-    sample_rate: int = TARGET_SAMPLE_RATE,
-) -> bool:
-    if samples.size < int(min_duration_seconds * sample_rate):
-        return False
-    rms = float(np.sqrt(np.mean(np.square(samples)))) if samples.size else 0.0
-    return rms >= rms_threshold
+def write_uploaded_audio(data: bytes, suffix: str = ".wav") -> str:
+    """Save uploaded bytes and return a path suitable for decoder libraries."""
+    handle = tempfile.NamedTemporaryFile(suffix=suffix, delete=False)
+    handle.write(data)
+    handle.close()
+    return handle.name
+
+
+def remove_temp_audio(path: str | None) -> None:
+    if path:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

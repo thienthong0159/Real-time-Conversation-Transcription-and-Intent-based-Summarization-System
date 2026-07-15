@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 import os
 from pathlib import Path
 
-import streamlit as st
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -90,7 +90,15 @@ class WhisperRefineEncoderStage(nn.Module):
         positions = self.embed_positions.weight[: hidden_states.size(1)]
         hidden_states = hidden_states + positions.unsqueeze(0).to(hidden_states.dtype)
         for layer in self.layers:
-            layer_outputs = layer(hidden_states, attention_mask=None)
+            # Transformers 4.57 requires ``layer_head_mask`` even when no
+            # attention heads are masked. Passing None preserves the original
+            # cascaded encoder inference behavior.
+            layer_outputs = layer(
+                hidden_states,
+                attention_mask=None,
+                layer_head_mask=None,
+                output_attentions=False,
+            )
             hidden_states = layer_outputs[0] if isinstance(layer_outputs, tuple) else layer_outputs
         return self.layer_norm(hidden_states)
 
@@ -240,7 +248,7 @@ def load_base_phowhisper(model_name_or_path: str, dtype: torch.dtype):
         )
 
 
-@st.cache_resource(show_spinner="Loading notebook-exported Cascaded PhoWhisper...")
+@lru_cache(maxsize=4)
 def load_cascaded_encoder(checkpoint_path: str, device: str):
     checkpoint_file = resolve_checkpoint_file(checkpoint_path)
     checkpoint = torch.load(checkpoint_file, map_location="cpu", weights_only=True)

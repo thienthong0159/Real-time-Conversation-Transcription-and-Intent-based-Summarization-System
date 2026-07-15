@@ -1,9 +1,8 @@
 # faster-phowhisper
 
-`faster-phowhisper` is a Streamlit application for Vietnamese speech recognition
-with PhoWhisper. It supports offline audio files, browser microphone streaming,
-GPU execution on local machines or Colab/Kaggle, and public sharing through
-ngrok.
+`Realtime Transcription` is a native PySide6 desktop application for Vietnamese
+speech recognition. It supports audio-file transcription and live microphone
+streaming, with GPU or CPU execution on local machines.
 
 The project is ASR-only.
 
@@ -16,7 +15,7 @@ The project is ASR-only.
   and `WhisperProcessor`.
 - Cascaded Encoder backend: a PyTorch inference path for checkpoints exported by
   `notebooks/train_cascaded_phowhisper_colab_kaggle.ipynb`.
-- UI/runtime: Streamlit, `streamlit-webrtc`, and ngrok.
+- UI/runtime: PySide6 (Qt).
 
 ## Project Structure
 
@@ -39,8 +38,7 @@ The project is ASR-only.
     └── train_cascaded_phowhisper_colab_kaggle.ipynb
 ```
 
-Older repository folders may still exist, but `app.py` is the Streamlit entry
-point for this app.
+`app.py` is the native desktop application entry point.
 
 ## Install
 
@@ -65,52 +63,15 @@ torch = { index = "pytorch-cu128" }
 
 CPU fallback is automatic when CUDA is unavailable.
 
-## Configure Ngrok
-
-Set your ngrok authtoken before launching:
-
-PowerShell:
-
-```powershell
-$env:NGROK_AUTHTOKEN="your-ngrok-token"
-```
-
-macOS/Linux:
-
-```bash
-export NGROK_AUTHTOKEN="your-ngrok-token"
-```
-
-If `NGROK_AUTHTOKEN` is missing, the app still runs locally and shows setup
-instructions in the sidebar.
-
 ## Run Locally
 
 ```bash
-uv run streamlit run app.py
+uv run python app.py
 ```
 
-When `NGROK_AUTHTOKEN` is set, the app opens an ngrok tunnel and displays the
-public URL in the sidebar.
-
-## Streamlit Model Loading Pattern
-
-The app follows the usual Streamlit pattern for NLP/ASR projects:
-
-- model-loading functions are wrapped with `st.cache_resource`;
-- the sidebar shows backend, model path, and checkpoint status;
-- `Load selected ASR model` loads the selected model before inference;
-- actual transcription also loads lazily, so the first run works even if the
-  user skips manual preload;
-- only the selected ASR backend is loaded, avoiding unnecessary memory use.
-
-Useful environment defaults:
-
-```bash
-APP_DEFAULT_DEVICE=cuda
-APP_DEFAULT_COMPUTE_TYPE=float16
-APP_DEFAULT_ASR_BACKEND=transformers
-```
+Select the backend, device, beam size, VAD setting, and model path in the left
+configuration panel. The **Live microphone** tab is available for Whisper
+Streaming and displays confirmed segments while you speak.
 
 ## Run On Colab Or Kaggle
 

@@ -1,3 +1,5 @@
-from .common import ASRSegment, transcribe
+"""Vietnamese ASR backends and shared application contracts."""
 
-__all__ = ["ASRSegment", "transcribe"]
+from .common import ASRSegment, TranscriptionResult
+
+__all__ = ["ASRSegment", "TranscriptionResult"]

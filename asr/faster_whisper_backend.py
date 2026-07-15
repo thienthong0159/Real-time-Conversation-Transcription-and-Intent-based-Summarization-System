@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
+import warnings
 
-import streamlit as st
 import torch
 from faster_whisper import WhisperModel
 
@@ -25,7 +26,7 @@ def resolve_device(device: str) -> str:
     if device == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda" and not torch.cuda.is_available():
-        st.warning("CUDA was selected but is unavailable. Falling back to CPU.")
+        warnings.warn("CUDA was selected but is unavailable. Falling back to CPU.", stacklevel=2)
         return "cpu"
     return device
 
@@ -36,7 +37,7 @@ def default_compute_type(device: str, compute_type: str | None = None) -> str:
     return "float16" if device == "cuda" else "int8"
 
 
-@st.cache_resource(show_spinner="Loading CTranslate2 PhoWhisper model...")
+@lru_cache(maxsize=4)
 def load_faster_whisper_model(
     model_name_or_path: str,
     device: str,
